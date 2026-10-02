@@ -116,5 +116,23 @@ export function createProjectEnvironmentAtoms<R, E>(
           JSON.stringify([environmentId, input.cwd, input.relativePath]),
       },
     }),
+    renameEntry: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:rename-entry",
+      tag: WS_METHODS.projectsRenameEntry,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.cwd]),
+      },
+    }),
+    duplicateFile: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:projects:duplicate-file",
+      tag: WS_METHODS.projectsDuplicateFile,
+      scheduler: fileScheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.cwd]),
+      },
+    }),
   };
 }

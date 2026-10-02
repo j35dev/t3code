@@ -54,7 +54,9 @@ import {
   type ProjectFileFailure,
   type ProjectFileOperation,
   ProjectListEntriesError,
+  ProjectDuplicateFileError,
   ProjectReadFileError,
+  ProjectRenameEntryError,
   ProjectSearchContentsError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
@@ -327,6 +329,8 @@ function projectFileFailureContext(
       return { failure: "path_not_file", resolvedPath: error.resolvedPath };
     case "WorkspaceBinaryFileError":
       return { failure: "binary_file", resolvedPath: error.resolvedPath };
+    case "WorkspacePathExistsError":
+      return { failure: "destination_exists", resolvedPath: error.resolvedPath };
     default:
       return unexpectedCompatibilityError(error);
   }
@@ -3407,6 +3411,36 @@ const makeWsRpcLayer = (
                   new ProjectWriteFileError({
                     cwd: input.cwd,
                     relativePath: input.relativePath,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsRenameEntry]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsRenameEntry,
+            workspaceFileSystem.renameEntry(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectRenameEntryError({
+                    ...input,
+                    ...projectFileFailureContext(cause),
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "workspace" },
+          ),
+        [WS_METHODS.projectsDuplicateFile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.projectsDuplicateFile,
+            workspaceFileSystem.duplicateFile(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectDuplicateFileError({
+                    ...input,
                     ...projectFileFailureContext(cause),
                     cause,
                   }),

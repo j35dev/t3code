@@ -338,4 +338,163 @@ it.layer(TestLayer, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
       }),
     );
   });
+
+  describe("renameEntry", () => {
+    it.effect("renames a file and updates the entry listing", () =>
+      Effect.gen(function* () {
+        const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "config/.env copy.example", "KEY=value\n");
+        yield* workspaceEntries.list({ cwd });
+
+        const result = yield* workspaceFileSystem.renameEntry({
+          cwd,
+          relativePath: "config/.env copy.example",
+          nextRelativePath: "config/.env",
+        });
+
+        expect(result).toEqual({ relativePath: "config/.env" });
+        expect(yield* fileSystem.readFileString(path.join(cwd, "config/.env"))).toBe("KEY=value\n");
+        expect(yield* fileSystem.exists(path.join(cwd, "config/.env copy.example"))).toBe(false);
+        const listed = yield* workspaceEntries.list({ cwd, directoryPath: "config" });
+        expect(listed.entries.map((entry) => entry.path)).toEqual(["config/.env"]);
+      }),
+    );
+
+    it.effect("renames a directory with its contents", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "src/nested/index.ts", "export {};\n");
+
+        yield* workspaceFileSystem.renameEntry({
+          cwd,
+          relativePath: "src",
+          nextRelativePath: "lib",
+        });
+
+        expect(yield* fileSystem.readFileString(path.join(cwd, "lib/nested/index.ts"))).toBe(
+          "export {};\n",
+        );
+        expect(yield* fileSystem.exists(path.join(cwd, "src"))).toBe(false);
+      }),
+    );
+
+    it.effect("refuses to overwrite an existing entry", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, ".env.example", "EXAMPLE=1\n");
+        yield* writeTextFile(cwd, ".env", "SECRET=1\n");
+
+        const error = yield* workspaceFileSystem
+          .renameEntry({ cwd, relativePath: ".env.example", nextRelativePath: ".env" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathExistsError);
+        expect(yield* fileSystem.readFileString(path.join(cwd, ".env"))).toBe("SECRET=1\n");
+        expect(yield* fileSystem.readFileString(path.join(cwd, ".env.example"))).toBe(
+          "EXAMPLE=1\n",
+        );
+      }),
+    );
+
+    it.effect("rejects destinations outside the workspace root", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "notes.md", "# Notes\n");
+
+        const error = yield* workspaceFileSystem
+          .renameEntry({ cwd, relativePath: "notes.md", nextRelativePath: "../escape.md" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspacePaths.WorkspacePathOutsideRootError);
+        expect(yield* fileSystem.exists(path.join(cwd, "notes.md"))).toBe(true);
+        expect(yield* fileSystem.exists(path.resolve(cwd, "..", "escape.md"))).toBe(false);
+      }),
+    );
+  });
+
+  describe("duplicateFile", () => {
+    it.effect("copies a file next to itself under the first free name", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "config/.env.example", "KEY=value\n");
+
+        const first = yield* workspaceFileSystem.duplicateFile({
+          cwd,
+          relativePath: "config/.env.example",
+        });
+        const second = yield* workspaceFileSystem.duplicateFile({
+          cwd,
+          relativePath: "config/.env.example",
+        });
+
+        expect(first).toEqual({ relativePath: "config/.env copy.example" });
+        expect(second).toEqual({ relativePath: "config/.env copy 2.example" });
+        expect(yield* fileSystem.readFileString(path.join(cwd, "config/.env copy.example"))).toBe(
+          "KEY=value\n",
+        );
+      }),
+    );
+
+    it.effect("keeps a leading dot as part of the name", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, ".env", "KEY=value\n");
+
+        const result = yield* workspaceFileSystem.duplicateFile({ cwd, relativePath: ".env" });
+
+        expect(result).toEqual({ relativePath: ".env copy" });
+      }),
+    );
+
+    it.effect("copies binary files byte for byte", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const bytes = Uint8Array.from([0x61, 0, 0xff, 0x62]);
+        yield* fileSystem.writeFile(path.join(cwd, "asset.bin"), bytes);
+
+        const result = yield* workspaceFileSystem.duplicateFile({ cwd, relativePath: "asset.bin" });
+
+        expect(result).toEqual({ relativePath: "asset copy.bin" });
+        const copied = yield* fileSystem.readFile(path.join(cwd, "asset copy.bin"));
+        expect(Array.from(copied)).toEqual(Array.from(bytes));
+      }),
+    );
+
+    it.effect("rejects directories", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "src"));
+
+        const error = yield* workspaceFileSystem
+          .duplicateFile({ cwd, relativePath: "src" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathNotFileError);
+        expect(yield* fileSystem.exists(path.join(cwd, "src copy"))).toBe(false);
+      }),
+    );
+  });
 });

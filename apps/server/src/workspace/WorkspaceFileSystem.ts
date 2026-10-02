@@ -13,8 +13,12 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
 import type {
+  ProjectDuplicateFileInput,
+  ProjectDuplicateFileResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectRenameEntryInput,
+  ProjectRenameEntryResult,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
 } from "@t3tools/contracts";
@@ -29,6 +33,15 @@ import * as WorkspaceEntries from "./WorkspaceEntries.ts";
 import * as WorkspacePaths from "./WorkspacePaths.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
+const DUPLICATE_NAME_MAX_ATTEMPTS = 100;
+
+/** "notes.md" -> "notes copy.md", then "notes copy 2.md". A leading dot is part of the name. */
+function duplicateFileName(name: string, attempt: number): string {
+  const extensionStart = name.lastIndexOf(".");
+  const stem = extensionStart > 0 ? name.slice(0, extensionStart) : name;
+  const extension = extensionStart > 0 ? name.slice(extensionStart) : "";
+  return `${stem} copy${attempt === 1 ? "" : ` ${attempt}`}${extension}`;
+}
 
 export class WorkspaceFileSystemOperationError extends Schema.TaggedError<WorkspaceFileSystemOperationError>()(
   "WorkspaceFileSystemOperationError",
@@ -46,6 +59,8 @@ export class WorkspaceFileSystemOperationError extends Schema.TaggedError<Worksp
       "close",
       "make-directory",
       "write-file",
+      "rename",
+      "copy-file",
     ]),
     cause: Schema.Defect(),
   },
@@ -95,11 +110,25 @@ export class WorkspaceBinaryFileError extends Schema.TaggedError<WorkspaceBinary
   }
 }
 
+export class WorkspacePathExistsError extends Schema.TaggedError<WorkspacePathExistsError>()(
+  "WorkspacePathExistsError",
+  {
+    workspaceRoot: Schema.String,
+    relativePath: Schema.String,
+    resolvedPath: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Workspace path '${this.relativePath}' in '${this.workspaceRoot}' already exists: ${this.resolvedPath}`;
+  }
+}
+
 export const WorkspaceFileSystemError = Schema.Union([
   WorkspaceFileSystemOperationError,
   WorkspaceFilePathEscapeError,
   WorkspacePathNotFileError,
   WorkspaceBinaryFileError,
+  WorkspacePathExistsError,
 ]);
 export type WorkspaceFileSystemError = typeof WorkspaceFileSystemError.Type;
 
@@ -127,6 +156,24 @@ export class WorkspaceFileSystem extends Context.Service<
       input: ProjectWriteFileInput,
     ) => Effect.Effect<
       ProjectWriteFileResult,
+      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /**
+     * Rename or move a file or directory within the workspace root.
+     *
+     * Never overwrites: fails when the destination already exists.
+     */
+    readonly renameEntry: (
+      input: ProjectRenameEntryInput,
+    ) => Effect.Effect<
+      ProjectRenameEntryResult,
+      WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
+    >;
+    /** Copy a file next to itself under the first free "name copy" name. */
+    readonly duplicateFile: (
+      input: ProjectDuplicateFileInput,
+    ) => Effect.Effect<
+      ProjectDuplicateFileResult,
       WorkspaceFileSystemError | WorkspacePaths.WorkspacePathOutsideRootError
     >;
   }
@@ -340,7 +387,115 @@ export const make = Effect.gen(function* () {
     return { relativePath: target.relativePath };
   });
 
-  return WorkspaceFileSystem.of({ readFile, writeFile });
+  const renameEntry: WorkspaceFileSystem["Service"]["renameEntry"] = Effect.fn(
+    "WorkspaceFileSystem.renameEntry",
+  )(function* (input) {
+    const source = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+    });
+    const destination = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.nextRelativePath,
+    });
+    const operationError =
+      (operation: "stat" | "rename", operationPath: string) => (cause: unknown) =>
+        new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: source.absolutePath,
+          operationPath,
+          operation,
+          cause,
+        });
+
+    // A case-only rename on a case-insensitive filesystem finds the source at
+    // the destination path, which is not a collision.
+    const caseOnlyRename =
+      source.absolutePath !== destination.absolutePath &&
+      source.absolutePath.toLowerCase() === destination.absolutePath.toLowerCase();
+    if (!caseOnlyRename) {
+      const destinationExists = yield* fileSystem
+        .exists(destination.absolutePath)
+        .pipe(Effect.mapError(operationError("stat", destination.absolutePath)));
+      if (destinationExists) {
+        return yield* new WorkspacePathExistsError({
+          workspaceRoot: input.cwd,
+          relativePath: input.nextRelativePath,
+          resolvedPath: destination.absolutePath,
+        });
+      }
+    }
+
+    yield* fileSystem
+      .rename(source.absolutePath, destination.absolutePath)
+      .pipe(Effect.mapError(operationError("rename", source.absolutePath)));
+    yield* workspaceEntries.refresh(input.cwd);
+    return { relativePath: destination.relativePath };
+  });
+
+  const duplicateFile: WorkspaceFileSystem["Service"]["duplicateFile"] = Effect.fn(
+    "WorkspaceFileSystem.duplicateFile",
+  )(function* (input) {
+    const source = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+    });
+    const operationError =
+      (operation: "stat" | "copy-file", operationPath: string) => (cause: unknown) =>
+        new WorkspaceFileSystemOperationError({
+          workspaceRoot: input.cwd,
+          relativePath: input.relativePath,
+          resolvedPath: source.absolutePath,
+          operationPath,
+          operation,
+          cause,
+        });
+
+    const sourceStat = yield* fileSystem
+      .stat(source.absolutePath)
+      .pipe(Effect.mapError(operationError("stat", source.absolutePath)));
+    if (sourceStat.type !== "File") {
+      return yield* new WorkspacePathNotFileError({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+        resolvedPath: source.absolutePath,
+      });
+    }
+
+    const directory = path.dirname(source.absolutePath);
+    const name = path.basename(source.absolutePath);
+    for (let attempt = 1; attempt <= DUPLICATE_NAME_MAX_ATTEMPTS; attempt++) {
+      const copyPath = path.join(directory, duplicateFileName(name, attempt));
+      // COPYFILE_EXCL claims the name and copies in one step, so a file created
+      // concurrently is never overwritten.
+      const copied = yield* Effect.tryPromise({
+        try: () =>
+          NodeFSP.copyFile(source.absolutePath, copyPath, NodeFS.constants.COPYFILE_EXCL).then(
+            () => true,
+            (cause: NodeJS.ErrnoException) => {
+              if (cause.code === "EEXIST") return false;
+              throw cause;
+            },
+          ),
+        catch: operationError("copy-file", copyPath),
+      });
+      if (!copied) continue;
+      yield* workspaceEntries.refresh(input.cwd);
+      const copy = yield* workspacePaths.resolveRelativePathWithinRoot({
+        workspaceRoot: input.cwd,
+        relativePath: path.relative(input.cwd, copyPath),
+      });
+      return { relativePath: copy.relativePath };
+    }
+    return yield* new WorkspacePathExistsError({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+      resolvedPath: path.join(directory, duplicateFileName(name, DUPLICATE_NAME_MAX_ATTEMPTS)),
+    });
+  });
+
+  return WorkspaceFileSystem.of({ readFile, writeFile, renameEntry, duplicateFile });
 });
 
 export const layer = Layer.effect(WorkspaceFileSystem, make);
