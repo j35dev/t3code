@@ -106,6 +106,8 @@ interface FilePreviewPanelProps {
   revealRequestId: number;
   onOpenFile: (relativePath: string) => void;
   onPendingChange: (relativePath: string, pending: boolean) => void;
+  onEntryRenamed: (fromPath: string, toPath: string) => void;
+  hasPendingSave: (relativePath: string) => boolean;
   selectedFilePending: boolean;
   workspaceMutationId: string | null;
 }
@@ -918,6 +920,8 @@ export default function FilePreviewPanel({
   revealRequestId,
   onOpenFile,
   onPendingChange,
+  onEntryRenamed,
+  hasPendingSave,
   selectedFilePending,
   workspaceMutationId,
 }: FilePreviewPanelProps) {
@@ -1308,6 +1312,8 @@ export default function FilePreviewPanel({
               selectedPath={relativePath}
               selectedPathRevealId={revealRequestId}
               onOpenFile={onOpenFile}
+              onEntryRenamed={onEntryRenamed}
+              hasPendingSave={hasPendingSave}
               workspaceMutationId={workspaceMutationId}
               {...(previewPath && !isMedia && !isPdf
                 ? { onRefreshSelectedFile: file.refresh }

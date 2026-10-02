@@ -2,7 +2,12 @@ import { RefreshIcon } from "~/components/ui/refresh-icon";
 import type {
   ContextMenuItem as TreeContextMenuItem,
   ContextMenuOpenContext as TreeContextMenuOpenContext,
+  FileTreeRenameEvent,
 } from "@pierre/trees";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ProjectEntry } from "@t3tools/contracts";
 import { FileTree, useFileTree, useFileTreeSearch, useFileTreeSelector } from "@pierre/trees/react";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
@@ -26,7 +31,9 @@ import { createFileTreeDragMentionController } from "./fileTreeDragMention";
 import { areAllDirectoriesExpanded, setAllDirectoriesExpanded } from "./fileTreeExpansion";
 import { buildFileTreePathUpdates } from "./fileTreePathReconciliation";
 import { useDirectoryEntries } from "./useDirectoryEntries";
+import { projectEnvironment } from "~/state/projects";
 import { useProjectPathSearch } from "~/state/queries";
+import { useAtomCommand } from "~/state/use-atom-command";
 
 interface FileBrowserPanelProps {
   environmentId: EnvironmentId;
@@ -38,7 +45,16 @@ interface FileBrowserPanelProps {
   selectedPathRevealId: number;
   onOpenFile: (relativePath: string) => void;
   onRefreshSelectedFile?: () => void;
+  /** Called after an entry is renamed on disk, so open tabs can follow it. */
+  onEntryRenamed: (fromPath: string, toPath: string) => void;
+  /** Whether the file, or any file inside the folder, still has an edit being saved. */
+  hasPendingSave: (relativePath: string) => boolean;
   workspaceMutationId: string | null;
+}
+
+function commandFailureMessage(result: Parameters<typeof squashAtomCommandFailure>[0]): string {
+  const error = squashAtomCommandFailure(result);
+  return error instanceof Error ? error.message : "An error occurred.";
 }
 
 function treePath(entry: ProjectEntry): string {
@@ -102,11 +118,15 @@ export default function FileBrowserPanel({
   selectedPathRevealId,
   onOpenFile,
   onRefreshSelectedFile,
+  onEntryRenamed,
+  hasPendingSave,
   workspaceMutationId,
 }: FileBrowserPanelProps) {
   const { resolvedTheme } = useTheme();
   const composerRef = useComposerHandleContext();
   const fileContextMenu = useFileContextMenu(environmentId);
+  const renameEntry = useAtomCommand(projectEnvironment.renameEntry, { reportFailure: false });
+  const duplicateFile = useAtomCommand(projectEnvironment.duplicateFile, { reportFailure: false });
   const {
     entries: directoryEntries,
     load,
@@ -179,16 +199,27 @@ export default function FileBrowserPanel({
       : { x: anchorRect.left, y: anchorRect.bottom };
     const fileTarget = { environmentId, filePath: relativePath, workspaceRoot: cwd };
     const fileMenuItems = fileContextMenu.buildItems(fileTarget);
+    let closed = false;
     try {
       const clicked = await api.contextMenu.show(
         [
           ...fileMenuItems,
+          { id: "rename", label: "Rename" },
+          ...(item.kind === "file" ? [{ id: "duplicate", label: "Duplicate" }] : []),
           { id: "copy-mention", label: "Copy mention" },
           { id: "add-to-chat", label: "Add to chat" },
         ],
         position,
       );
       if (clicked === null) return;
+      if (clicked === "rename" || clicked === "duplicate") {
+        // Restoring focus to the row would blur the inline rename input and end the rename.
+        closed = true;
+        context.close({ restoreFocus: false });
+        if (clicked === "rename") startRenaming(item.path);
+        else await duplicateEntry(relativePath);
+        return;
+      }
       // "Open with" submenu selections report the child id ("editor:<id>"),
       // which is not present in the top-level item list.
       const isFileMenuAction =
@@ -230,12 +261,101 @@ export default function FileBrowserPanel({
         }
       }
     } finally {
-      context.close();
+      if (!closed) context.close();
     }
   };
-  const showEntryContextMenuRef = useRef(showEntryContextMenu);
+
+  /** Puts a row into inline rename. Selecting it for the rename is not a request to open it. */
+  const startRenaming = (path: string) => {
+    const tree = treeModelRef.current;
+    if (!tree) return;
+    syncingSelectionRef.current = true;
+    const started = tree.startRenaming(path);
+    queueMicrotask(() => {
+      syncingSelectionRef.current = false;
+    });
+    if (started) return;
+    toastManager.add({
+      type: "error",
+      title: "Unable to rename",
+      description: hasPendingSave(path.replace(/\/$/, ""))
+        ? "Wait for the file to finish saving, then try again."
+        : "The entry is no longer in the file tree.",
+    });
+  };
+
+  /** Copies a file beside itself, then lets the user name the copy. */
+  const duplicateEntry = async (relativePath: string) => {
+    const result = await duplicateFile({ environmentId, input: { cwd, relativePath } });
+    if (result._tag !== "Success") {
+      if (isAtomCommandInterrupted(result)) return;
+      toastManager.add({
+        type: "error",
+        title: "Unable to duplicate file",
+        description: commandFailureMessage(result),
+      });
+      return;
+    }
+    const copyPath = result.value.relativePath;
+    const tree = treeModelRef.current;
+    // Show the copy now rather than after the listing refresh, so it can be renamed at once.
+    if (tree && !tree.getItem(copyPath)) {
+      tree.add(copyPath);
+      if (previousTreePathsRef.current) {
+        previousTreePathsRef.current = [...previousTreePathsRef.current, copyPath];
+      }
+    }
+    refresh();
+    startRenaming(copyPath);
+  };
+
+  /**
+   * Persists an inline rename. The tree fires this just before it moves the row itself,
+   * so a failed rename has to move the row back.
+   */
+  const commitRename = async ({ sourcePath, destinationPath, isFolder }: FileTreeRenameEvent) => {
+    const toTreePath = (path: string) => (isFolder ? `${path}/` : path);
+    const sourceTreePath = toTreePath(sourcePath);
+    const destinationTreePath = toTreePath(destinationPath);
+    // Keep the reconciliation baseline in step with the tree's own move, so the next
+    // listing refresh does not remove and re-add the renamed rows.
+    const treePathsBeforeRename = previousTreePathsRef.current;
+    const renamedTreePaths =
+      treePathsBeforeRename?.map((path) =>
+        path === sourceTreePath || (isFolder && path.startsWith(sourceTreePath))
+          ? `${destinationTreePath}${path.slice(sourceTreePath.length)}`
+          : path,
+      ) ?? null;
+    previousTreePathsRef.current = renamedTreePaths;
+
+    const result = await renameEntry({
+      environmentId,
+      input: { cwd, relativePath: sourcePath, nextRelativePath: destinationPath },
+    });
+    if (result._tag === "Success") {
+      onEntryRenamed(sourcePath, result.value.relativePath);
+      refresh();
+      if (query.trim()) pathSearch.refresh();
+      return;
+    }
+    const tree = treeModelRef.current;
+    // A listing refresh that landed meanwhile has already put the old rows back.
+    if (previousTreePathsRef.current === renamedTreePaths) {
+      previousTreePathsRef.current = treePathsBeforeRename;
+      if (tree?.getItem(destinationTreePath)) tree.move(destinationTreePath, sourceTreePath);
+    }
+    if (isAtomCommandInterrupted(result)) return;
+    toastManager.add({
+      type: "error",
+      title: "Unable to rename",
+      description: commandFailureMessage(result),
+    });
+  };
+
+  // The tree keeps the callbacks it was created with, so they read the latest closures here.
+  const treeCallbacksRef = useRef({ showEntryContextMenu, commitRename, hasPendingSave });
   useEffect(() => {
-    showEntryContextMenuRef.current = showEntryContextMenu;
+    treeCallbacksRef.current = { showEntryContextMenu, commitRename, hasPendingSave };
   });
 
   const treeModelRef = useRef<ReturnType<typeof useFileTree>["model"] | null>(null);
@@ -251,8 +371,18 @@ export default function FileBrowserPanel({
       contextMenu: {
         triggerMode: "right-click",
         onOpen: (item, context) => {
-          void showEntryContextMenuRef.current(item, context);
+          void treeCallbacksRef.current.showEntryContextMenu(item, context);
         },
+      },
+    },
+    renaming: {
+      // A debounced save would write the old path back after the rename.
+      canRename: (item) => !treeCallbacksRef.current.hasPendingSave(item.path),
+      onRename: (event) => {
+        void treeCallbacksRef.current.commitRename(event);
+      },
+      onError: (error) => {
+        toastManager.add({ type: "error", title: "Unable to rename", description: error });
       },
     },
     // Rows only need to be draggable so entries can be dropped into the chat

@@ -163,6 +163,8 @@ interface RightPanelStoreState {
   closeAllSurfaces: (ref: ScopedThreadRef) => void;
   reconcileBrowserSurfaces: (ref: ScopedThreadRef, tabIds: readonly string[]) => void;
   reconcileFileSurfaces: (ref: ScopedThreadRef, workspaceAvailable: boolean) => void;
+  /** Point open file tabs at a renamed entry: the entry itself, or files inside a renamed folder. */
+  renameFileSurfaces: (ref: ScopedThreadRef, fromPath: string, toPath: string) => void;
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
@@ -812,6 +814,39 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               activeSurfaceId: activeStillExists
                 ? current.activeSurfaceId
                 : (surfaces.at(-1)?.id ?? null),
+            };
+          }),
+        ),
+      renameFileSurfaces: (ref, fromPath, toPath) =>
+        set((state) =>
+          automaticUpdate(state, scopedThreadKey(ref), (current) => {
+            const renamedIds = new Map<string, string>();
+            const renamed = current.surfaces.map((surface) => {
+              if (surface.kind !== "file" || surface.attachment !== undefined) return surface;
+              const inside = surface.relativePath.startsWith(`${fromPath}/`);
+              if (surface.relativePath !== fromPath && !inside) return surface;
+              const next = fileSurface(
+                `${toPath}${surface.relativePath.slice(fromPath.length)}`,
+                surface.revealLine,
+                surface.revealRequestId,
+              );
+              renamedIds.set(surface.id, next.id);
+              return next;
+            });
+            if (renamedIds.size === 0) return current;
+            // A tab already open on the destination path would otherwise appear twice.
+            const destinationIds = new Set(renamedIds.values());
+            const surfaces = renamed.filter(
+              (surface, index) =>
+                !destinationIds.has(surface.id) || current.surfaces[index]?.id !== surface.id,
+            );
+            return {
+              ...current,
+              surfaces,
+              activeSurfaceId:
+                current.activeSurfaceId === null
+                  ? null
+                  : (renamedIds.get(current.activeSurfaceId) ?? current.activeSurfaceId),
             };
           }),
         ),

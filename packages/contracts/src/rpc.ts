@@ -165,9 +165,15 @@ import {
   ProjectListEntriesError,
   ProjectListEntriesInput,
   ProjectListEntriesResult,
+  ProjectDuplicateFileError,
+  ProjectDuplicateFileInput,
+  ProjectDuplicateFileResult,
   ProjectReadFileError,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectRenameEntryError,
+  ProjectRenameEntryInput,
+  ProjectRenameEntryResult,
   ProjectSearchContentsError,
   ProjectSearchContentsInput,
   ProjectSearchContentsResult,
@@ -296,6 +302,8 @@ export const WS_METHODS = {
   projectsSearchContents: "projects.searchContents",
   projectsSearchEntries: "projects.searchEntries",
   projectsWriteFile: "projects.writeFile",
+  projectsRenameEntry: "projects.renameEntry",
+  projectsDuplicateFile: "projects.duplicateFile",
   projectsEnsureScratch: "projects.ensureScratch",
   projectsCreateNew: "projects.createNew",
 
@@ -999,6 +1007,18 @@ const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
 });
 
+const WsProjectsRenameEntryRpc = Rpc.make(WS_METHODS.projectsRenameEntry, {
+  payload: ProjectRenameEntryInput,
+  success: ProjectRenameEntryResult,
+  error: Schema.Union([ProjectRenameEntryError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectsDuplicateFileRpc = Rpc.make(WS_METHODS.projectsDuplicateFile, {
+  payload: ProjectDuplicateFileInput,
+  success: ProjectDuplicateFileResult,
+  error: Schema.Union([ProjectDuplicateFileError, EnvironmentAuthorizationError]),
+});
+
 // Finds or creates the Scratch project rooted at ServerConfig.scratchWorkspaceRoot.
 const WsProjectsEnsureScratchRpc = Rpc.make(WS_METHODS.projectsEnsureScratch, {
   payload: Schema.Struct({}),
@@ -1533,6 +1553,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsProjectsEnsureScratchRpc,
   WsProjectsCreateNewRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsRenameEntryRpc,
+  WsProjectsDuplicateFileRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
   WsAgentSessionsScanRpc,

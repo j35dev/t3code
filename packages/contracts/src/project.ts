@@ -218,6 +218,7 @@ export const ProjectFileFailure = Schema.Literals([
   "resolved_path_outside_root",
   "path_not_file",
   "binary_file",
+  "destination_exists",
   "operation_failed",
 ]);
 export type ProjectFileFailure = typeof ProjectFileFailure.Type;
@@ -231,6 +232,8 @@ export const ProjectFileOperation = Schema.Literals([
   "close",
   "make-directory",
   "write-file",
+  "rename",
+  "copy-file",
 ]);
 export type ProjectFileOperation = typeof ProjectFileOperation.Type;
 
@@ -323,6 +326,88 @@ export class ProjectWriteFileError extends Schema.TaggedError<ProjectWriteFileEr
       message:
         decodedProjectErrorMessage(props) ??
         `Failed to write workspace file '${props.relativePath}' in '${props.cwd}'.`,
+    } as any);
+  }
+}
+
+export const ProjectRenameEntryInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+  nextRelativePath: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH),
+  ),
+});
+export type ProjectRenameEntryInput = typeof ProjectRenameEntryInput.Type;
+
+export const ProjectRenameEntryResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectRenameEntryResult = typeof ProjectRenameEntryResult.Type;
+
+export class ProjectRenameEntryError extends Schema.TaggedError<ProjectRenameEntryError>()(
+  "ProjectRenameEntryError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    relativePath: Schema.optional(TrimmedNonEmptyString),
+    nextRelativePath: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectFileFailure),
+    resolvedPath: Schema.optional(TrimmedNonEmptyString),
+    resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    operation: Schema.optional(ProjectFileOperation),
+    operationPath: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: ProjectFileFailureContext & { readonly nextRelativePath: string }) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        (props.failure === "destination_exists"
+          ? `'${props.nextRelativePath}' already exists.`
+          : `Failed to rename '${props.relativePath}' in '${props.cwd}'.`),
+    } as any);
+  }
+}
+
+/** Copies a file next to itself under the first free "name copy" name. */
+export const ProjectDuplicateFileInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+});
+export type ProjectDuplicateFileInput = typeof ProjectDuplicateFileInput.Type;
+
+export const ProjectDuplicateFileResult = Schema.Struct({
+  /** The copy's path. */
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectDuplicateFileResult = typeof ProjectDuplicateFileResult.Type;
+
+export class ProjectDuplicateFileError extends Schema.TaggedError<ProjectDuplicateFileError>()(
+  "ProjectDuplicateFileError",
+  {
+    cwd: Schema.optional(TrimmedNonEmptyString),
+    relativePath: Schema.optional(TrimmedNonEmptyString),
+    failure: Schema.optional(ProjectFileFailure),
+    resolvedPath: Schema.optional(TrimmedNonEmptyString),
+    resolvedWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
+    operation: Schema.optional(ProjectFileOperation),
+    operationPath: Schema.optional(TrimmedNonEmptyString),
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  // @effect-diagnostics-next-line overriddenSchemaConstructor:off
+  constructor(props: ProjectFileFailureContext) {
+    super({
+      ...props,
+      message:
+        decodedProjectErrorMessage(props) ??
+        (props.failure === "path_not_file"
+          ? `'${props.relativePath}' is not a file.`
+          : `Failed to duplicate '${props.relativePath}' in '${props.cwd}'.`),
     } as any);
   }
 }

@@ -2323,6 +2323,16 @@ export default function ChatView(props: ChatViewProps) {
     },
     [activeProjectKey],
   );
+  const hasPendingFileSave = useCallback(
+    (relativePath: string) => {
+      for (const surfaceId of pendingFileSurfaceIds) {
+        const pendingPath = surfaceId.slice("file:".length);
+        if (pendingPath === relativePath || pendingPath.startsWith(`${relativePath}/`)) return true;
+      }
+      return false;
+    },
+    [pendingFileSurfaceIds],
+  );
   const configuredPreviewUrls = useMemo(
     () => getConfiguredPreviewUrls(activeProjectScripts),
     [activeProjectScripts],
@@ -4668,6 +4678,13 @@ export default function ChatView(props: ChatViewProps) {
       useRightPanelStore.getState().openFile(activeThreadRef, relativePath);
     },
     [activeProject, activeThreadRef],
+  );
+  const renameFileSurfaces = useCallback(
+    (fromPath: string, toPath: string) => {
+      if (!activeThreadRef) return;
+      useRightPanelStore.getState().renameFileSurfaces(activeThreadRef, fromPath, toPath);
+    },
+    [activeThreadRef],
   );
   // The shell carries server PR updates even while thread detail is still loading.
   const activeThreadMetadata = activeThreadShell ?? activeThread;
@@ -9688,6 +9705,8 @@ export default function ChatView(props: ChatViewProps) {
           }
           onOpenFile={openFileSurface}
           onPendingChange={handleFilePendingChange}
+          onEntryRenamed={renameFileSurfaces}
+          hasPendingSave={hasPendingFileSave}
           selectedFilePending={
             renderedRightPanelSurface.kind === "file" &&
             pendingFileSurfaceIds.has(renderedRightPanelSurface.id)
